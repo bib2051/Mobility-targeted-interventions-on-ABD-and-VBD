@@ -1,0 +1,402 @@
+import numpy as np
+from scipy import interpolate
+import scipy.linalg
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+mpl.rcParams['axes.linewidth'] = 2  # Set the axes linewidth
+
+
+def identify_hotspots_and_suburbs(population_density):
+    """
+    Divides a region into "hotspots" (high population density areas) and
+    "suburbs" (lower population density areas) based on the provided
+    population density data.
+
+    This function uses a spline interpolation method to find a threshold
+    in the population density distribution. Areas with population
+    densities above this threshold are classified as hotspots, and those
+    below as suburbs.
+
+    Args:
+        population_density (list or numpy.ndarray): A 1D array representing
+            the population density of different areas. The order of
+            elements in this array is important, as it corresponds to
+            the spatial arrangement of the areas.
+
+    Returns:
+        tuple: A tuple containing two lists:
+            - hotspot_indices (list): A list of indices corresponding to the
+              areas identified as hotspots.
+            - suburb_indices (list): A list of indices corresponding to the
+              areas identified as suburbs.
+
+    Raises:
+        TypeError: If the input `population_density` is not a list or a
+            numpy array.
+        ValueError: If the input `population_density` is empty.
+
+    Example:
+        >>> population_density = [100, 200, 50, 300, 150, 25]
+        >>> hotspots, suburbs = identify_hotspots_and_suburbs(population_density)
+        >>> print(f"Hotspot indices: {hotspots}")
+        >>> print(f"Suburb indices: {suburbs}")
+    """
+    if not isinstance(population_density, (list, np.ndarray)):
+        raise TypeError("population_density must be a list or a numpy array")
+    if not population_density:
+        raise ValueError("population_density cannot be empty")
+
+    V = np.array(population_density)  # Ensure V is a numpy array for easier operations
+    N = len(V)
+    sorted_population_density = np.sort(V)  # Sort the population densities
+    sorted_indices = np.argsort(V)  # Get the original indices of the sorted values
+
+    # Calculate the cumulative sum of sorted population densities
+    cumulative_population_density = np.cumsum(sorted_population_density)
+
+    # Create an array of x-values for interpolation
+    x = np.linspace(0, N - 1, N)
+
+    # Perform spline interpolation on the cumulative population densities
+    spline_function = interpolate.splrep(x, cumulative_population_density)
+
+    # Evaluate the spline at the maximum x-value
+    x0 = max(x)
+    y0 = interpolate.splev(x0, spline_function)
+
+    # Calculate the derivative of the spline at x0
+    dydx = interpolate.splev(x0, spline_function, der=1)
+
+    # Define the tangent line function
+    tangent_line = lambda x: dydx * x + (y0 - dydx * x0)
+    y1 = tangent_line(x)
+
+    # Find the x-intercept of the tangent line (where it crosses y=0)
+    x1 = next((x[i] for i in range(len(y1)) if y1[i] > 0), None)  # Returns the first x where y1 > 0, or None if never true.
+    if x1 is None:
+        x1 = 0  # if the tangent line never goes above 0, set x1 to 0.
+
+    # Identify hotspots and suburbs based on the x-intercept
+    hotspot_indices = list(sorted_indices[int(x1):])
+    suburb_indices = list(sorted_indices[:int(x1)])
+
+    return hotspot_indices, suburb_indices
+
+
+def calculate_vbd_vulnerability(mobility_matrix, mosquito_population, human_population):
+    """
+    Calculates the epidemic vulnerability for a vector-borne disease (VBD)
+    based on human mobility, mosquito population, and human population.
+
+    This function computes a matrix that represents the potential for disease
+    transmission between different areas, considering the movement of people
+    and the distribution of mosquitoes. The leading eigenvalue of this
+    matrix is used as a measure of epidemic vulnerability.
+
+    Args:
+        mobility_matrix (numpy.ndarray): A 2D numpy array representing the
+            mobility of humans between areas. R[j][i] represents the
+            proportion of people from area j that move to area i.
+        mosquito_population (list or numpy.ndarray): A 1D array representing
+            the mosquito population in each area.
+        human_population (list or numpy.ndarray): A 1D array representing
+            the human population in each area.
+
+    Returns:
+        float: The epidemic vulnerability, calculated as the square root of
+            the leading eigenvalue of the transmission matrix.
+
+    Raises:
+        TypeError: If any of the input arguments have an incorrect type.
+        ValueError: If the dimensions of the input arrays are incompatible.
+    """
+    # Input validation
+    if not isinstance(mobility_matrix, np.ndarray):
+        raise TypeError("mobility_matrix must be a numpy array")
+    if not isinstance(mosquito_population, (list, np.ndarray)):
+        raise TypeError("mosquito_population must be a list or numpy array")
+    if not isinstance(human_population, (list, np.ndarray)):
+        raise TypeError("human_population must be a list or numpy array")
+
+    mosquito_population = np.array(mosquito_population)
+    human_population = np.array(human_population)
+    N = len(human_population)
+
+    if mobility_matrix.shape != (N, N):
+        raise ValueError("mobility_matrix must be a square matrix with dimensions NxN")
+    if len(mosquito_population) != N:
+        raise ValueError("mosquito_population must have the same length as human_population")
+    if len(human_population) != N:
+        raise ValueError("human_population must have the same length as mosquito_population")
+
+    N_eff = []
+    for i in range(N):
+        Eff = [mobility_matrix[j][i] * human_population[j] for j in range(N)]
+        N_eff.append(sum(Eff))
+
+    M0 = np.zeros((N, N))
+    M1 = np.zeros((N, N))
+
+    for i in range(N):
+        for j in range(N):
+            if N_eff[j] > 0:
+                M0[i][j] = mobility_matrix[i][j] * mosquito_population[j] / N_eff[j]
+            if N_eff[i] > 0:
+                M1[i][j] = mobility_matrix[j][i] * human_population[j] / N_eff[i]
+
+    M2 = np.dot(M0, M1)
+    eigenvalues, _ = scipy.linalg.eig(M2)  # Use scipy.linalg.eig for non-symmetric matrices
+    max_eigenvalue = np.max(np.real(eigenvalues))
+    vulnerability = np.sqrt(max_eigenvalue)
+    return vulnerability
+
+
+def calculate_abd_vulnerability(mobility_matrix, human_population, area):
+    """
+    Calculates the epidemic vulnerability for an airborne disease (ABD)
+    based on human mobility, human population, and area.
+
+    This function computes a matrix that represents the potential for disease
+    transmission between different areas, considering the movement of people
+    and the size of each area. The leading eigenvalue of this
+    matrix is used as a measure of epidemic vulnerability.
+
+    Args:
+        mobility_matrix (numpy.ndarray): A 2D numpy array representing the
+            mobility of humans between areas. R[i][j] represents the
+            proportion of people from area j that move to area i.
+        human_population (list or numpy.ndarray): A 1D array representing
+            the human population in each area.
+        area (list or numpy.ndarray): A 1D array representing the area of each region.
+
+    Returns:
+        float: The epidemic vulnerability, calculated as the leading
+            eigenvalue of the transmission matrix.
+
+    Raises:
+        TypeError: If any of the input arguments have an incorrect type.
+        ValueError: If the dimensions of the input arrays are incompatible.
+    """
+    # Input validation
+    if not isinstance(mobility_matrix, np.ndarray):
+        raise TypeError("mobility_matrix must be a numpy array.")
+    if not isinstance(human_population, (list, np.ndarray)):
+        raise TypeError("human_population must be a list or numpy array.")
+    if not isinstance(area, (list, np.ndarray)):
+        raise TypeError("area must be a list or numpy array.")
+
+    human_population = np.array(human_population)
+    area = np.array(area)
+    N = len(human_population)
+
+    if mobility_matrix.shape != (N, N):
+        raise ValueError("mobility_matrix must be a square matrix with dimensions NxN")
+    if len(human_population) != N:
+        raise ValueError("human_population must have the same length as area and match the dimensions of mobility_matrix")
+    if len(area) != N:
+        raise ValueError("area must have the same length as human_population and match the dimensions of mobility_matrix")
+
+    M = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            # Corrected calculation based on the provided formula
+            term1 = (mobility_matrix[i, i]**2) * (human_population[j] / human_population[i]) * mobility_matrix[i, j] * mobility_matrix[j, j]
+            term2 = (area[i] / area[j]) * (mobility_matrix[i, j]**2) * (human_population[j] / human_population[i]) * mobility_matrix[j, j]
+            M[i, j] = (human_population[i] / area[i]) * (term1 + term2)
+
+    eigenvalues, _ = np.linalg.eig(M)
+    max_eigenvalue = np.max(np.real(eigenvalues))
+    vulnerability = max_eigenvalue
+    return vulnerability
+
+
+def implement_mobility_intervention(mobility_matrix, hotspot_indices, suburb_indices):
+    """
+    Implements a mobility intervention strategy that reduces connectivity
+    between hotspots and redistributes that mobility to suburbs.
+
+    This function modifies the given mobility matrix by setting the mobility
+    between hotspots to zero and redistributing the removed mobility
+    proportionally to the suburbs.  It assumes that the rows of the
+    mobility matrix are normalized (i.e., sum of each row is 1).
+
+    Args:
+        mobility_matrix (numpy.ndarray): A 2D numpy array representing the
+            mobility of humans between areas. R[i][j] represents the
+            proportion of people from area j that move to area i.
+        hotspot_indices (list): A list of indices identifying hotspot areas.
+        suburb_indices (list): A list of indices identifying suburb areas.
+
+    Returns:
+        numpy.ndarray: A modified mobility matrix with reduced connectivity
+        between hotspots.
+
+    Raises:
+        TypeError: If `mobility_matrix` is not a numpy array.
+        ValueError: If `mobility_matrix` is not square or if the indices
+            are out of bounds.
+    """
+    if not isinstance(mobility_matrix, np.ndarray):
+        raise TypeError("mobility_matrix must be a numpy array")
+
+    N = mobility_matrix.shape[0]
+    if mobility_matrix.shape != (N, N):
+        raise ValueError("mobility_matrix must be a square matrix")
+
+    for index_list in [hotspot_indices, suburb_indices]:
+        for index in index_list:
+            if not 0 <= index < N:
+                raise ValueError("Indices in hotspot_indices or suburb_indices are out of bounds.")
+
+    modified_mobility_matrix = np.copy(mobility_matrix)  # Create a copy to avoid modifying the original
+
+    for i in hotspot_indices:
+        for j in hotspot_indices:
+            modified_mobility_matrix[i, j] = 0  # Set mobility between hotspots to zero
+
+        # Redistribute the removed mobility to suburbs
+        redistribution_amount = np.sum(mobility_matrix[i, hotspot_indices])
+        if len(suburb_indices) > 0:
+            redistribution_weights = np.array([mobility_matrix[i, k] for k in suburb_indices])
+            if np.sum(redistribution_weights) > 0:
+                redistribution_probabilities = redistribution_weights / np.sum(redistribution_weights)
+                modified_mobility_matrix[i, suburb_indices] += redistribution_amount * redistribution_probabilities
+            else:
+                # Distribute evenly if weights are zero
+                modified_mobility_matrix[i, suburb_indices] += redistribution_amount / len(suburb_indices)
+        # Handle the case where there are no suburbs.
+        else:
+             modified_mobility_matrix[i, i] += redistribution_amount
+
+    # Renormalize rows to ensure they sum to 1
+    row_sums = modified_mobility_matrix.sum(axis=1, keepdims=True)
+    modified_mobility_matrix = np.divide(modified_mobility_matrix, row_sums, out=np.zeros_like(modified_mobility_matrix), where=row_sums != 0)
+
+    return modified_mobility_matrix
+
+
+
+def analyze_intervention_effectiveness(
+    mobility_matrix,
+    human_population,
+    mosquito_population,
+    area,
+    hotspot_indices,
+    suburb_indices,
+    num_iterations=1000,
+):
+    """
+    Analyzes the effectiveness of a mobility intervention strategy on both
+    airborne (ABD) and vector-borne (VBD) diseases by comparing the epidemic
+    vulnerability with and without the intervention.
+
+    Args:
+        mobility_matrix (numpy.ndarray): A 2D numpy array representing the
+            mobility of humans between areas. R[i][j] represents the
+            proportion of people from area j that move to area i.
+        human_population (list or numpy.ndarray): A 1D array representing
+            the human population in each area.
+        mosquito_population (list or numpy.ndarray): A 1D array representing
+            the mosquito population in each area.
+        area (list or numpy.ndarray): A 1D array representing the area of each region.
+        hotspot_indices (list): A list of indices identifying hotspot areas.
+        suburb_indices (list): A list of indices identifying suburb areas.
+        num_iterations (int, optional): The number of iterations to run the
+            simulation. Defaults to 1000.
+
+    Returns:
+        pandas.DataFrame: A DataFrame containing the ratios of modified
+        vulnerability to original vulnerability for both ABD and VBD,
+        along with a label indicating the disease type.
+    """
+    # 1. Calculate the original vulnerability for ABD and VBD.
+    original_vbd_vulnerability = calculate_vbd_vulnerability(
+        mobility_matrix, mosquito_population, human_population
+    )
+    original_abd_vulnerability = calculate_abd_vulnerability(
+        mobility_matrix, human_population, area
+    )
+
+    # 2. Implement the mobility intervention.
+    modified_mobility_matrix = implement_mobility_intervention(
+        mobility_matrix, hotspot_indices, suburb_indices
+    )
+
+    # 3. Calculate the new vulnerability after the intervention for ABD and VBD.
+    modified_vbd_vulnerability = calculate_vbd_vulnerability(
+        modified_mobility_matrix, mosquito_population, human_population
+    )
+    modified_abd_vulnerability = calculate_abd_vulnerability(
+        modified_mobility_matrix, human_population, area
+    )
+
+    # 4. Calculate the ratio of new vulnerability to original vulnerability.
+    vbd_vulnerability_ratios = [
+        modified_vbd_vulnerability / original_vbd_vulnerability
+    ] * num_iterations  # Repeat the ratio for the number of iterations
+    abd_vulnerability_ratios = [
+        modified_abd_vulnerability / original_abd_vulnerability
+    ] * num_iterations
+
+    # 5. Store the results in a DataFrame.
+    df = pd.DataFrame()
+    df["Vulnerability Ratio"] = abd_vulnerability_ratios + vbd_vulnerability_ratios
+    label = ["ABD"] * num_iterations + ["VBD"] * num_iterations
+    df["Disease"] = label
+
+    return df
+
+
+if __name__ == "__main__":
+    # Example Usage:
+    # 1. Define the input data.
+    population_density = [100, 200, 50, 300, 150, 25]
+    human_population = [1000, 2000, 500, 3000, 1500, 250]
+    mosquito_population = [10000, 20000, 5000, 30000, 15000, 2500]
+    area = [10, 20, 5, 30, 15, 2.5]  # in km^2
+    N = len(population_density)
+    # Create a sample mobility matrix (replace with your actual data)
+    mobility_matrix = np.random.rand(N, N)
+    for i in range(N):
+        mobility_matrix[i, i] = 0.25 + np.random.rand() * 0.15 # Self-loop: 25% to 40%
+    mobility_matrix = mobility_matrix / mobility_matrix.sum(axis=1, keepdims=True)  # Normalize rows
+
+    # 2. Identify hotspots and suburbs.
+    hotspot_indices, suburb_indices = identify_hotspots_and_suburbs(population_density)
+    print(f"Hotspot indices: {hotspot_indices}")
+    print(f"Suburb indices: {suburb_indices}")
+
+    # 3. Analyze the intervention.
+    df_results = analyze_intervention_effectiveness(
+        mobility_matrix,
+        human_population,
+        mosquito_population,
+        area,
+        hotspot_indices,
+        suburb_indices,
+    )
+
+    # 4. Visualize the results.
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.violinplot(
+        x=df_results["Disease"],
+        y=df_results["Vulnerability Ratio"],
+        linewidth=3,
+        scale="count",
+        color="violet",
+    )
+    plt.axhline(y=1, color="blue", linestyle="--", linewidth=2)
+    plt.text(1.38, 0.8, "Beneficial", fontsize=20, c="g", alpha=0.7)
+    plt.text(1.38, 1.2, "Detrimental", fontsize=20, c="r", alpha=0.7)
+    plt.ylim([0, 3])
+    plt.xlim([-0.5, 2.1])
+    plt.yticks(fontsize=16)
+    plt.xticks(fontsize=24)
+    plt.tick_params("both", length=7, width=1.4, direction="in")
+    plt.ylabel("$ν^{Mod.}/ν$", fontsize=24)
+    plt.xlabel("", fontsize=18)
+    plt.title("Impact of Mobility Intervention", fontsize=18) # Add a title
+    plt.show()

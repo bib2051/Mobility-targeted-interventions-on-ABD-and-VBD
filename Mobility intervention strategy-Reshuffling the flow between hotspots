@@ -353,10 +353,10 @@ def analyze_intervention_effectiveness(
 if __name__ == "__main__":
     # Example Usage:
     # 1. Define the input data.
-    population_density = [100, 200, 50, 300, 150, 25]
-    human_population = [1000, 2000, 500, 3000, 1500, 250]
+    human_population = [100, 2000, 500, 3000, 1500, 250]
     mosquito_population = [10000, 20000, 5000, 30000, 15000, 2500]
-    area = [10, 20, 5, 30, 15, 2.5]  # in km^2
+    area = [10, 6, 12, 3, 5, 5]  # in km^2
+    population_density = list(np.array(human_population)/np.array(area))
     N = len(population_density)
     # Create a sample mobility matrix (replace with your actual data)
     mobility_matrix = np.random.rand(N, N)
